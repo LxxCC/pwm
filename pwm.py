@@ -452,7 +452,7 @@ class PWMViewer:
         v_low     = p["v_low"]
         mname     = p.get("mod_name", "Triangle")
 
-        ov_dur  = 3.0 / mod_freq
+        ov_dur  = 100.0 / pwm_freq  # fixed 100 PWM cycles
         det_dur = 6.0 / pwm_freq
 
         args = (pwm_freq, base_duty, v_high, v_low,
@@ -509,7 +509,7 @@ class PWMViewer:
         ax.set_xlabel("Time (ms)", fontsize=8)
         ax.set_ylabel("Voltage (V)", fontsize=8)
         ax.set_title(
-            f"PWM Overview -- {ov_dur*1e3:.1f} ms  ({int(ov_dur*pwm_freq)} cycles)",
+            f"PWM Overview -- 100 PWM cycles  ({ov_dur*1e3:.2f} ms,  {ov_dur*mod_freq:.1f} mod cycles)",
             fontsize=9,
         )
 
@@ -551,7 +551,7 @@ class PWMViewer:
         if self._last_params is None:
             return
         p = dict(self._last_params)
-        ov_dur = 3.0 / p["mod_freq"]
+        ov_dur = 100.0 / p["pwm_freq"]  # fixed 100 PWM cycles
         dt = self._get_dt()
         t, sig, _ = generate_pwm(
             p["pwm_freq"], p["base_duty"], p["v_high"], p["v_low"],
