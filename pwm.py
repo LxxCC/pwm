@@ -196,13 +196,13 @@ class PWMViewer:
 
     # (attr, label, unit, v_min, v_max, scale, row, col)
     SLIDER_DEFS = [
-        ("pwm_freq",  "PWM Freq",   "kHz",  1.0, 100.0, 1e3,  0, 0),
+        ("pwm_freq",  "PWM Freq",   "kHz",  1.0, 2000.0, 1e3,  0, 0),
         ("base_duty", "Duty Cycle", "%",   10.0,  90.0, 0.01, 1, 0),
         ("v_high",    "V High",     "V",   -5.0,   5.0, 1.0,  2, 0),
         ("v_low",     "V Low",      "V",    5.0,  20.0, 1.0,  3, 0),
-        ("rise_time", "Rise Time",  "ns",  10.0,1000.0, 1e-9, 0, 1),
-        ("fall_time", "Fall Time",  "ns",  10.0,1000.0, 1e-9, 1, 1),
-        ("mod_freq",  "Mod Freq",   "kHz",  0.1,  10.0, 1e3,  2, 1),
+        ("rise_time", "Rise Time",  "ns",  1.0,1000.0, 1e-9, 0, 1),
+        ("fall_time", "Fall Time",  "ns",  1.0,1000.0, 1e-9, 1, 1),
+        ("mod_freq",  "Mod Freq",   "kHz",  0.1,  100.0, 1e3,  2, 1),
         ("mod_depth", "Freq Depth", "%",    1.0,  49.0, 0.01, 3, 1),
     ]
 
