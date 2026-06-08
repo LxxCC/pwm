@@ -18,7 +18,7 @@ import numpy as np
 import matplotlib
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
-from matplotlib.widgets import Slider, Button, RadioButtons
+from matplotlib.widgets import Slider, Button, RadioButtons, TextBox
 
 
 # ---------------------------------------------------------------------------
@@ -57,33 +57,36 @@ def generate_pwm(
     dt: float,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
+    Frequency-dithered PWM (spread-spectrum / jitter).
+
+    The modulation wave shifts the instantaneous PWM frequency each cycle:
+        f_inst = pwm_freq * (1 + mod_depth * mod_wave(t_cycle_start))
+
+    Duty cycle stays fixed at base_duty.  The period of each cycle changes.
+
     Returns (t, signal, mod_wave_arr).
-    Duty cycle for each PWM cycle is set by the modulation wave at the cycle midpoint.
     """
     n = max(2, int(duration / dt))
     t = np.arange(n) * dt
     signal = np.full(n, v_low, dtype=float)
-
-    pwm_period = 1.0 / pwm_freq
-    n_cycles = int(np.ceil(duration / pwm_period)) + 1
     fn = MOD_WAVES[mod_name]
 
-    for ci in range(n_cycles):
-        t0 = ci * pwm_period
-        if t0 >= duration:
-            break
+    t_cur = 0.0          # running cycle-start time (variable period)
+    while t_cur < duration:
+        mod_val = float(fn(np.array([t_cur]), mod_freq)[0])
 
-        mod_val = float(fn(np.array([t0 + pwm_period * 0.5]), mod_freq)[0])
-        dc = float(np.clip(base_duty + mod_depth * mod_val, 0.01, 0.99))
+        # Instantaneous frequency & period for this cycle
+        f_inst = max(pwm_freq * (1.0 + mod_depth * mod_val), 1.0)
+        T_inst = 1.0 / f_inst
 
-        t_he = t0 + dc * pwm_period
-        t_ce = t0 + pwm_period
+        t_he = t_cur + base_duty * T_inst          # end of high phase
+        t_ce = t_cur + T_inst                       # end of cycle
 
         def idx(tv: float) -> int:
             return min(max(int(tv / dt), 0), n)
 
-        i_s  = idx(t0)
-        i_re = min(idx(t0 + rise_time), idx(t_he))
+        i_s  = idx(t_cur)
+        i_re = min(idx(t_cur + rise_time), idx(t_he))
         i_he = idx(t_he)
         i_fe = min(idx(t_he + fall_time), idx(t_ce))
         i_ce = idx(t_ce)
@@ -91,6 +94,8 @@ def generate_pwm(
         if i_re > i_s:  signal[i_s:i_re]  = np.linspace(v_low, v_high, i_re - i_s)
         if i_he > i_re: signal[i_re:i_he] = v_high
         if i_fe > i_he: signal[i_he:i_fe] = np.linspace(v_high, v_low, i_fe - i_he)
+
+        t_cur = t_ce
 
     return t, signal, fn(t, mod_freq)
 
@@ -198,7 +203,7 @@ class PWMViewer:
         ("rise_time", "Rise Time",  "ns",  10.0,1000.0, 1e-9, 0, 1),
         ("fall_time", "Fall Time",  "ns",  10.0,1000.0, 1e-9, 1, 1),
         ("mod_freq",  "Mod Freq",   "kHz",  0.1,  10.0, 1e3,  2, 1),
-        ("mod_depth", "Mod Depth",  "%",    1.0,  49.0, 0.01, 3, 1),
+        ("mod_depth", "Freq Depth", "%",    1.0,  49.0, 0.01, 3, 1),
     ]
 
     BG_DARK  = "#0d1117"
@@ -224,7 +229,6 @@ class PWMViewer:
         self._build_sliders()
         self._build_mod_selector()
         self._build_export_panel()
-        self._build_info_box()
         self._update_plots(self.DEFAULTS)
         self._connect()
 
@@ -261,12 +265,21 @@ class PWMViewer:
     # ------------------------------------------------------------------
 
     def _build_sliders(self):
-        self.sliders: dict = {}
+        self.sliders:   dict = {}
+        self.textboxes: dict = {}   # attr -> (TextBox, vmin, vmax)
+        self._updating = False      # guard against feedback loops
+
+        SL_W  = 0.28    # slider width (narrowed to leave room for textbox)
+        TB_W  = 0.068   # textbox width
+        TB_GAP = 0.006  # gap between slider right and textbox left
         col_x = [0.05, 0.52]
         row_y = [0.278, 0.236, 0.194, 0.152]
 
         for attr, label, unit, vmin, vmax, scale, row, col in self.SLIDER_DEFS:
-            ax_s = self.fig.add_axes([col_x[col], row_y[row], 0.36, 0.026])
+            sx, sy = col_x[col], row_y[row]
+
+            # Slider
+            ax_s = self.fig.add_axes([sx, sy, SL_W, 0.026])
             ax_s.set_facecolor(self.BG_PANEL)
             init = self.DEFAULTS[attr] / scale
             s = Slider(ax_s, f"{label} ({unit})", vmin, vmax,
@@ -275,15 +288,34 @@ class PWMViewer:
             s.valtext.set_color(self.C_BLUE); s.valtext.set_fontsize(8)
             self.sliders[attr] = (s, scale)
 
-        # dt (time step) slider — full width, below the two columns
-        ax_dt = self.fig.add_axes([0.05, 0.112, 0.84, 0.026])
+            # TextBox
+            ax_tb = self.fig.add_axes([sx + SL_W + TB_GAP, sy, TB_W, 0.026])
+            tb = TextBox(ax_tb, "", initial=f"{init:.4g}",
+                         color=self.BG_PANEL, hovercolor="#1e2a1e")
+            tb.text_disp.set_color(self.C_BLUE)
+            tb.text_disp.set_fontsize(8.5)
+            for sp in ax_tb.spines.values():
+                sp.set_color(self.C_BORDER)
+            self.textboxes[attr] = (tb, vmin, vmax)
+
+        # dt slider + textbox (full width row)
+        DT_SL_W = 0.756
+        ax_dt = self.fig.add_axes([0.05, 0.112, DT_SL_W, 0.026])
         ax_dt.set_facecolor(self.BG_PANEL)
-        dt_default_ns = 1.0 / (self.DEFAULTS["pwm_freq"] * 80) * 1e9  # ~625 ns
+        dt_default_ns = 1.0 / (self.DEFAULTS["pwm_freq"] * 80) * 1e9
         self._sl_dt = Slider(ax_dt, "Time Step dt  (ns)", 1.0, 2000.0,
                              valinit=round(dt_default_ns, 1),
                              color=self.C_ACCENT, track_color=self.C_GRID)
         self._sl_dt.label.set_color(self.C_TEXT);   self._sl_dt.label.set_fontsize(8)
         self._sl_dt.valtext.set_color(self.C_BLUE); self._sl_dt.valtext.set_fontsize(8)
+
+        ax_tb_dt = self.fig.add_axes([0.05 + DT_SL_W + TB_GAP, 0.112, TB_W, 0.026])
+        self._tb_dt = TextBox(ax_tb_dt, "", initial=f"{dt_default_ns:.1f}",
+                              color=self.BG_PANEL, hovercolor="#1e2a1e")
+        self._tb_dt.text_disp.set_color(self.C_BLUE)
+        self._tb_dt.text_disp.set_fontsize(8.5)
+        for sp in ax_tb_dt.spines.values():
+            sp.set_color(self.C_BORDER)
 
         # Reset button
         ax_rst = self.fig.add_axes([0.46, 0.055, 0.08, 0.036])
@@ -294,6 +326,51 @@ class PWMViewer:
         ax_inv = self.fig.add_axes([0.56, 0.055, 0.10, 0.036])
         self.btn_invert = Button(ax_inv, "Invert OFF", color=self.BG_PANEL, hovercolor="#3d2200")
         self.btn_invert.label.set_color(self.C_MUTED); self.btn_invert.label.set_fontsize(8)
+
+    # ------------------------------------------------------------------
+    # Textbox sync helpers
+    # ------------------------------------------------------------------
+
+    def _sync_textboxes(self):
+        """Push current slider values into the textboxes (no submit fired)."""
+        if self._updating:
+            return
+        self._updating = True
+        for attr, (tb, _, _) in self.textboxes.items():
+            s, _ = self.sliders[attr]
+            tb.set_val(f"{s.val:.4g}")
+        self._tb_dt.set_val(f"{self._sl_dt.val:.4g}")
+        self._updating = False
+
+    def _make_tb_submit(self, attr: str):
+        """Factory: return an on_submit handler for a named slider textbox."""
+        def _submit(text):
+            if self._updating:
+                return
+            try:
+                val = float(text)
+                tb, vmin, vmax = self.textboxes[attr]
+                val = float(np.clip(val, vmin, vmax))
+                s, _ = self.sliders[attr]
+                self._updating = True
+                s.set_val(val)   # fires on_changed → _on_slider_change
+                self._updating = False
+            except (ValueError, TypeError):
+                pass   # ignore bad input; textbox will re-sync on next draw
+        return _submit
+
+    def _make_tb_dt_submit(self):
+        def _submit(text):
+            if self._updating:
+                return
+            try:
+                val = float(np.clip(float(text), 1.0, 2000.0))
+                self._updating = True
+                self._sl_dt.set_val(val)
+                self._updating = False
+            except (ValueError, TypeError):
+                pass
+        return _submit
 
     # ------------------------------------------------------------------
     # Modulation waveform selector
@@ -349,19 +426,6 @@ class PWMViewer:
     # Info box
     # ------------------------------------------------------------------
 
-    def _build_info_box(self):
-        ax = self.fig.add_axes([0.47, 0.042, 0.42, 0.068])
-        ax.set_facecolor(self.BG_PANEL)
-        ax.axis("off")
-        for sp in ax.spines.values():
-            sp.set_color(self.C_BORDER)
-        self._info_text = ax.text(
-            0.03, 0.5, "",
-            transform=ax.transAxes,
-            color=self.C_MUTED, fontsize=8, va="center",
-            fontfamily="monospace", linespacing=1.7,
-        )
-
     # ------------------------------------------------------------------
     # Adaptive dt
     # ------------------------------------------------------------------
@@ -406,31 +470,31 @@ class PWMViewer:
         v_hi = max(v_high, v_low)
         v_margin = (v_hi - v_lo) * 0.12 + 0.3
 
-        # ---- modulation / duty cycle plot ----
-        t_d = np.linspace(0, ov_dur, 3000)
-        raw_mod  = MOD_WAVES[mname](t_d, mod_freq)
-        duty_pct = np.clip(base_duty + mod_depth * raw_mod, 0, 1) * 100
-        d_range  = mod_depth * 100
+        # ---- instantaneous frequency plot (dithering envelope) ----
+        t_d    = np.linspace(0, ov_dur, 3000)
+        raw_mod = MOD_WAVES[mname](t_d, mod_freq)
+        f_inst  = pwm_freq * (1.0 + mod_depth * raw_mod)   # Hz
+        f_khz   = f_inst / 1e3
+        f_ctr   = pwm_freq / 1e3
+        f_dev   = mod_depth * f_ctr                          # kHz deviation
 
         ax = self.ax_duty
         ax.cla(); self._style_ax(ax)
-        ax.plot(t_d * 1e3, duty_pct, color=self.C_BLUE, lw=1.6, label="Duty cycle")
-        ax.axhline(base_duty * 100, color=self.C_ORANGE,
+        ax.plot(t_d * 1e3, f_khz, color=self.C_BLUE, lw=1.6, label="Inst. freq")
+        ax.axhline(f_ctr, color=self.C_ORANGE,
                    linestyle="--", lw=1.0, alpha=0.85,
-                   label=f"Centre {base_duty*100:.1f}%")
-        ax.fill_between(t_d * 1e3,
-                        (base_duty - mod_depth) * 100,
-                        (base_duty + mod_depth) * 100,
+                   label=f"Centre {f_ctr:.1f} kHz")
+        ax.fill_between(t_d * 1e3, f_ctr - f_dev, f_ctr + f_dev,
                         alpha=0.11, color=self.C_BLUE)
-        margin_y = d_range * 0.4 + 2.0
-        ax.set_ylim(base_duty*100 - d_range - margin_y,
-                    base_duty*100 + d_range + margin_y)
+        margin_y = f_dev * 0.4 + 0.5
+        ax.set_ylim(f_ctr - f_dev - margin_y, f_ctr + f_dev + margin_y)
         ax.set_xlim(0, ov_dur * 1e3)
         ax.set_xlabel("Time (ms)", fontsize=8)
-        ax.set_ylabel("Duty Cycle (%)", fontsize=8)
+        ax.set_ylabel("Frequency (kHz)", fontsize=8)
         ax.set_title(
-            f"Modulated Duty Cycle [{mname}]  --  "
-            f"{base_duty*100:.0f}% +/- {d_range:.0f}%  @  {mod_freq/1e3:.2f} kHz",
+            f"Dithered PWM Frequency [{mname}]  --  "
+            f"{f_ctr:.1f} kHz +/- {mod_depth*100:.0f}%  ({f_ctr-f_dev:.1f}~{f_ctr+f_dev:.1f} kHz)"
+            f"  @  mod {mod_freq/1e3:.2f} kHz",
             fontsize=9,
         )
         ax.legend(fontsize=7.5, facecolor=self.BG_PANEL,
@@ -463,16 +527,8 @@ class PWMViewer:
             fontsize=9,
         )
 
-        # ---- info box ----
-        dc_min = (base_duty - mod_depth) * 100
-        dc_max = (base_duty + mod_depth) * 100
-        self._info_text.set_text(
-            f"PWM period : {1e6/pwm_freq:.2f} us    Mod period : {1e3/mod_freq:.2f} ms\n"
-            f"Duty range : {dc_min:.1f}% -- {dc_max:.1f}%    "
-            f"H={v_high:.1f}V / L={v_low:.1f}V\n"
-            f"Rise:{p['rise_time']*1e9:.0f}ns  Fall:{p['fall_time']*1e9:.0f}ns  "
-            f"dt:{self._sl_dt.val:.0f}ns  Pts(ov/det):{len(t_ov):,}/{len(t_det):,}"
-        )
+        # sync textboxes with current slider values
+        self._sync_textboxes()
         self.fig.canvas.draw_idle()
 
     # ------------------------------------------------------------------
@@ -552,6 +608,7 @@ class PWMViewer:
         self._mod_name = "Triangle"
         self._mod_radio.set_active(0)
         self._update_plots(self.DEFAULTS)
+        self._sync_textboxes()
 
     def _connect(self):
         for _, (s, _) in self.sliders.items():
@@ -562,6 +619,11 @@ class PWMViewer:
         self.btn_export.on_clicked(self._on_export)
         self.btn_export_raw.on_clicked(self._on_export_raw)
         self._mod_radio.on_clicked(self._on_mod_change)
+        # Wire textbox submit → slider update
+        for attr in self.textboxes:
+            tb, _, _ = self.textboxes[attr]
+            tb.on_submit(self._make_tb_submit(attr))
+        self._tb_dt.on_submit(self._make_tb_dt_submit())
 
     def show(self):
         plt.show()
