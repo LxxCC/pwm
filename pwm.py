@@ -452,7 +452,7 @@ class PWMViewer:
         v_low     = p["v_low"]
         mname     = p.get("mod_name", "Triangle")
 
-        ov_dur  = 100.0 / pwm_freq  # fixed 100 PWM cycles
+        ov_dur  = 3.0 / mod_freq
         det_dur = 6.0 / pwm_freq
 
         args = (pwm_freq, base_duty, v_high, v_low,
@@ -509,7 +509,7 @@ class PWMViewer:
         ax.set_xlabel("Time (ms)", fontsize=8)
         ax.set_ylabel("Voltage (V)", fontsize=8)
         ax.set_title(
-            f"PWM Overview -- 100 PWM cycles  ({ov_dur*1e3:.2f} ms,  {ov_dur*mod_freq:.1f} mod cycles)",
+            f"PWM Overview -- {ov_dur*1e3:.1f} ms  ({int(ov_dur*pwm_freq)} cycles)",
             fontsize=9,
         )
 
@@ -538,11 +538,20 @@ class PWMViewer:
     def _on_export(self, _event):
         if self._last_params is None:
             return
-        t, sig, _ = self._last_ov_data
-        path = export_cst_format(t, sig, self._last_params, suffix=".csv")
+        p = self._last_params
+        # export with auto-fine dt: at least 80 pts/PWM cycle
+        dt_exp  = min(self._get_dt(), 1.0 / (p["pwm_freq"] * 80))
+        # at least 3 mod cycles OR 100 PWM cycles, whichever is longer
+        dur_exp = max(3.0 / p["mod_freq"], 100.0 / p["pwm_freq"])
+        t, sig, _ = generate_pwm(
+            p["pwm_freq"], p["base_duty"], p["v_high"], p["v_low"],
+            p["rise_time"], p["fall_time"],
+            p["mod_freq"], p["mod_depth"], p["mod_name"], dur_exp, dt_exp,
+        )
+        path = export_cst_format(t, sig, p, suffix=".csv")
         size_kb = path.stat().st_size / 1024
         self._status_text.set_text(
-            f"[Modulated] Saved: {path.name}  ({size_kb:.1f} KB, {len(t):,} pts)"
+            f"[Modulated] Saved: {path.name}  ({size_kb:.1f} KB, {len(t):,} pts, dt={dt_exp*1e9:.1f} ns)"
         )
         self.fig.canvas.draw_idle()
 
@@ -551,19 +560,19 @@ class PWMViewer:
         if self._last_params is None:
             return
         p = dict(self._last_params)
-        ov_dur = 100.0 / p["pwm_freq"]  # fixed 100 PWM cycles
-        dt = self._get_dt()
+        dt_exp  = min(self._get_dt(), 1.0 / (p["pwm_freq"] * 80))
+        dur_exp = max(3.0 / p["mod_freq"], 100.0 / p["pwm_freq"])
         t, sig, _ = generate_pwm(
             p["pwm_freq"], p["base_duty"], p["v_high"], p["v_low"],
             p["rise_time"], p["fall_time"],
             p["mod_freq"], 0.0,          # mod_depth = 0 → no modulation
-            "Triangle", ov_dur, dt,
+            "Triangle", dur_exp, dt_exp,
         )
         raw_params = dict(p, mod_depth=0.0, mod_name="(none -- pure PWM)")
         path = export_cst_format(t, sig, raw_params, suffix=".csv")
         size_kb = path.stat().st_size / 1024
         self._status_text.set_text(
-            f"[Pure PWM] Saved: {path.name}  ({size_kb:.1f} KB, {len(t):,} pts)"
+            f"[Pure PWM] Saved: {path.name}  ({size_kb:.1f} KB, {len(t):,} pts, dt={dt_exp*1e9:.1f} ns)"
         )
         self.fig.canvas.draw_idle()
 
