@@ -539,10 +539,8 @@ class PWMViewer:
         if self._last_params is None:
             return
         p = self._last_params
-        # export with auto-fine dt: at least 80 pts/PWM cycle
-        dt_exp  = min(self._get_dt(), 1.0 / (p["pwm_freq"] * 80))
-        # at least 3 mod cycles OR 100 PWM cycles, whichever is longer
-        dur_exp = max(3.0 / p["mod_freq"], 100.0 / p["pwm_freq"])
+        dt_exp  = self._get_dt()
+        dur_exp = 1e-3                   # fixed 1 ms
         t, sig, _ = generate_pwm(
             p["pwm_freq"], p["base_duty"], p["v_high"], p["v_low"],
             p["rise_time"], p["fall_time"],
@@ -560,8 +558,8 @@ class PWMViewer:
         if self._last_params is None:
             return
         p = dict(self._last_params)
-        dt_exp  = min(self._get_dt(), 1.0 / (p["pwm_freq"] * 80))
-        dur_exp = max(3.0 / p["mod_freq"], 100.0 / p["pwm_freq"])
+        dt_exp  = self._get_dt()
+        dur_exp = 1e-3                   # fixed 1 ms
         t, sig, _ = generate_pwm(
             p["pwm_freq"], p["base_duty"], p["v_high"], p["v_low"],
             p["rise_time"], p["fall_time"],
