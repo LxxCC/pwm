@@ -559,7 +559,7 @@ class PWMViewer:
             return
         p = dict(self._last_params)
         dt_exp  = self._get_dt()
-        dur_exp = 1e-3                   # fixed 1 ms
+        dur_exp = 3e-2                   # 30ms
         t, sig, _ = generate_pwm(
             p["pwm_freq"], p["base_duty"], p["v_high"], p["v_low"],
             p["rise_time"], p["fall_time"],
