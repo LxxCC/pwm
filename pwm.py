@@ -413,6 +413,22 @@ class PWMViewer:
                                      color="#1a1a3a", hovercolor="#4040a0")
         self.btn_export_raw.label.set_color(self.C_PURPLE); self.btn_export_raw.label.set_fontsize(8)
 
+        # Export duration label + textbox  (default 1 ms)
+        ax_edur_lbl = self.fig.add_axes([0.675, 0.055, 0.12, 0.036])
+        ax_edur_lbl.axis("off")
+        ax_edur_lbl.set_facecolor(self.BG_DARK)
+        ax_edur_lbl.text(1.0, 0.5, "Export Dur (ms):",
+                         color=self.C_MUTED, fontsize=8,
+                         ha="right", va="center")
+
+        ax_edur = self.fig.add_axes([0.805, 0.055, 0.072, 0.036])
+        self._tb_exp_dur = TextBox(ax_edur, "", initial="1.0",
+                                   color=self.BG_PANEL, hovercolor="#1e1e2e")
+        self._tb_exp_dur.text_disp.set_color(self.C_BLUE)
+        self._tb_exp_dur.text_disp.set_fontsize(8.5)
+        for sp in ax_edur.spines.values():
+            sp.set_color(self.C_BORDER)
+
         # Status bar
         ax_st = self.fig.add_axes([0.05, 0.012, 0.88, 0.018])
         ax_st.axis("off")
@@ -427,12 +443,20 @@ class PWMViewer:
     # ------------------------------------------------------------------
 
     # ------------------------------------------------------------------
-    # Adaptive dt
+    # Adaptive dt / export duration
     # ------------------------------------------------------------------
 
     def _get_dt(self) -> float:
         """Return the user-selected dt in seconds."""
         return self._sl_dt.val * 1e-9
+
+    def _get_exp_dur(self) -> float:
+        """Return the user-specified export duration in seconds (min 0.001 ms)."""
+        try:
+            val = float(self._tb_exp_dur.text)
+            return max(val, 0.001) * 1e-3
+        except (ValueError, TypeError):
+            return 1e-3
 
     # ------------------------------------------------------------------
     # Plot update
@@ -465,6 +489,7 @@ class PWMViewer:
         self._last_ov_data  = (t_ov,  sig_ov,  mod_ov)
         self._last_det_data = (t_det, sig_det, mod_det)
         self._last_params   = dict(p)
+        self._last_params["mod_name"] = mname   # always present, even when p=DEFAULTS
 
         v_lo = min(v_high, v_low)
         v_hi = max(v_high, v_low)
@@ -540,7 +565,7 @@ class PWMViewer:
             return
         p = self._last_params
         dt_exp  = self._get_dt()
-        dur_exp = 1e-3                   # fixed 1 ms
+        dur_exp = self._get_exp_dur()
         t, sig, _ = generate_pwm(
             p["pwm_freq"], p["base_duty"], p["v_high"], p["v_low"],
             p["rise_time"], p["fall_time"],
@@ -549,7 +574,8 @@ class PWMViewer:
         path = export_cst_format(t, sig, p, suffix=".csv")
         size_kb = path.stat().st_size / 1024
         self._status_text.set_text(
-            f"[Modulated] Saved: {path.name}  ({size_kb:.1f} KB, {len(t):,} pts, dt={dt_exp*1e9:.1f} ns)"
+            f"[Modulated] Saved: {path.name}  ({size_kb:.1f} KB, {len(t):,} pts, "
+            f"dur={dur_exp*1e3:.3f} ms, dt={dt_exp*1e9:.1f} ns)"
         )
         self.fig.canvas.draw_idle()
 
@@ -559,7 +585,7 @@ class PWMViewer:
             return
         p = dict(self._last_params)
         dt_exp  = self._get_dt()
-        dur_exp = 3e-2                   # 30ms
+        dur_exp = self._get_exp_dur()
         t, sig, _ = generate_pwm(
             p["pwm_freq"], p["base_duty"], p["v_high"], p["v_low"],
             p["rise_time"], p["fall_time"],
@@ -570,7 +596,8 @@ class PWMViewer:
         path = export_cst_format(t, sig, raw_params, suffix=".csv")
         size_kb = path.stat().st_size / 1024
         self._status_text.set_text(
-            f"[Pure PWM] Saved: {path.name}  ({size_kb:.1f} KB, {len(t):,} pts, dt={dt_exp*1e9:.1f} ns)"
+            f"[Pure PWM] Saved: {path.name}  ({size_kb:.1f} KB, {len(t):,} pts, "
+            f"dur={dur_exp*1e3:.3f} ms, dt={dt_exp*1e9:.1f} ns)"
         )
         self.fig.canvas.draw_idle()
 
