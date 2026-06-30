@@ -1,0 +1,502 @@
+#!/usr/bin/env python3
+"""
+PCB 走线寄生电感计算器 — 交互式 Matplotlib GUI
+
+功能
+----
+- 5 个参数滑块 + 文本框（联动输入）
+- 实时更新三张图表：
+    ① 电感量对比柱状图 (L / M / L_loop / L_loop_gnd)
+    ② 环路电感 vs 边到边间距（扫描曲线 + 当前工作点）
+    ③ 环路电感 vs 走线长度（扫描曲线 + 当前工作点）
+- 右侧结果面板显示全部计算值
+- 暗色主题，适配屏幕尺寸
+
+公式
+----
+自感 : Lorenz-Young （矩形截面导体）
+互感 : Neumann      （平行等长导体，精确解析式）
+地面 : 镜像法修正   （Image Method）
+"""
+
+import math
+import numpy as np
+import matplotlib
+import matplotlib.pyplot as plt
+import matplotlib.gridspec as gridspec
+from matplotlib.widgets import Slider, Button, TextBox
+
+# CJK 字体回退
+matplotlib.rcParams.update({
+    "font.sans-serif": [
+        "PingFang SC", "STHeiti", "Hiragino Sans GB",
+        "Microsoft YaHei", "SimHei", "DejaVu Sans",
+    ],
+    "axes.unicode_minus": False,
+})
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 物理计算
+# ─────────────────────────────────────────────────────────────────────────────
+
+MU0 = 4 * math.pi * 1e-7   # 真空磁导率 H/m
+
+
+def _self_L(l, w, t):
+    """Lorenz-Young 公式（标量 / SI 单位）"""
+    gmd = w + t
+    return (MU0 * l) / (2 * math.pi) * (
+        math.log(2 * l / gmd) + 0.5 + 0.2235 * gmd / l
+    )
+
+
+def _neumann(l, d):
+    """Neumann 互感公式（标量 / SI 单位）"""
+    hyp = math.sqrt(l * l + d * d)
+    return (MU0 / (2 * math.pi)) * (l * math.log((l + hyp) / d) - hyp + d)
+
+
+def _self_L_v(l, w, t):
+    """向量化自感：l 可为 numpy 数组"""
+    gmd = w + t
+    return (MU0 * l) / (2 * np.pi) * (
+        np.log(2 * l / gmd) + 0.5 + 0.2235 * gmd / l
+    )
+
+
+def _neumann_v(l, d):
+    """向量化 Neumann 互感：l 和/或 d 可为 numpy 数组"""
+    hyp = np.sqrt(l * l + d * d)
+    return (MU0 / (2 * np.pi)) * (l * np.log((l + hyp) / d) - hyp + d)
+
+
+def compute(length_mm, width_mm, thickness_mm, edge_to_edge_mm, dielectric_mm):
+    """完整计算，返回 dict，所有电感单位 nH"""
+    l   = length_mm       * 1e-3
+    w   = width_mm        * 1e-3
+    t   = thickness_mm    * 1e-3
+    s   = edge_to_edge_mm * 1e-3
+    h   = dielectric_mm   * 1e-3
+    dcc = w + s
+
+    L     = _self_L(l, w, t)
+    M     = _neumann(l, dcc)
+    Lloop = 2 * (L - M)
+
+    Mimg_s  = _neumann(l, 2 * h)
+    Leff    = L - Mimg_s
+    Mimg_c  = _neumann(l, math.sqrt(dcc * dcc + 4 * h * h))
+    Meff    = M - Mimg_c
+    LloopGnd = 2 * (Leff - Meff)
+
+    nH = 1e9
+    return dict(
+        dcc          = dcc * 1e3,
+        L            = L          * nH,
+        M            = M          * nH,
+        k            = M / L,
+        Lloop        = Lloop      * nH,
+        Lloop_pcm    = Lloop      * nH / length_mm * 10,
+        Leff         = Leff       * nH,
+        Meff         = Meff       * nH,
+        LloopGnd     = LloopGnd   * nH,
+        Lgnd_pcm     = LloopGnd   * nH / length_mm * 10,
+        suppression  = (1 - LloopGnd / Lloop) * 100,
+    )
+
+
+def sweep_gap(length_mm, width_mm, thickness_mm, gap_arr_mm, dielectric_mm):
+    """向量化：扫描边到边间距，返回 (L_loop_free, L_loop_gnd) 数组"""
+    l   = length_mm    * 1e-3
+    w   = width_mm     * 1e-3
+    t   = thickness_mm * 1e-3
+    h   = dielectric_mm * 1e-3
+    dcc = w + gap_arr_mm * 1e-3         # array
+
+    L     = _self_L(l, w, t)            # scalar
+    M     = _neumann_v(l, dcc)          # array
+    Mimg  = _neumann(l, 2 * h)          # scalar
+    Leff  = L - Mimg                    # scalar
+    Mimg2 = _neumann_v(l, np.sqrt(dcc ** 2 + 4 * h * h))   # array
+    Meff  = M - Mimg2                   # array
+    nH = 1e9
+    return 2 * (L - M) * nH, 2 * (Leff - Meff) * nH
+
+
+def sweep_len(length_arr_mm, width_mm, thickness_mm, edge_to_edge_mm, dielectric_mm):
+    """向量化：扫描走线长度，返回 (L_loop_free, L_loop_gnd) 数组"""
+    l   = length_arr_mm * 1e-3          # array
+    w   = width_mm      * 1e-3
+    t   = thickness_mm  * 1e-3
+    h   = dielectric_mm * 1e-3
+    dcc = w + edge_to_edge_mm * 1e-3   # scalar
+
+    L     = _self_L_v(l, w, t)         # array
+    M     = _neumann_v(l, dcc)         # array
+    Mimg  = _neumann_v(l, 2 * h)       # array
+    Leff  = L - Mimg                   # array
+    Mimg2 = _neumann_v(l, math.sqrt(dcc * dcc + 4 * h * h))  # array
+    Meff  = M - Mimg2                  # array
+    nH = 1e9
+    return 2 * (L - M) * nH, 2 * (Leff - Meff) * nH
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 屏幕尺寸辅助
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _screen_inches(max_w=0.90, max_h=0.88):
+    try:
+        import tkinter as _tk
+        r = _tk.Tk(); r.withdraw(); r.update()
+        sw, sh = r.winfo_screenwidth(), r.winfo_screenheight()
+        dpi = matplotlib.rcParams["figure.dpi"]
+        return sw * max_w / dpi, sh * max_h / dpi
+    except Exception:
+        return 14.0, 9.0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 参数定义
+# ─────────────────────────────────────────────────────────────────────────────
+
+DEFAULTS = dict(
+    length=100.0, width=0.127, thickness=0.035,
+    edge_to_edge=0.127, dielectric=0.100,
+)
+
+PARAM_DEFS = [
+    # (key,           标签,            单位,  vmin,  vmax)
+    ("length",       "走线长度",       "mm",   1.0, 500.0),
+    ("width",        "走线宽度",       "mm",  0.05,   5.0),
+    ("thickness",    "铜厚",          "mm",  0.01,  0.35),
+    ("edge_to_edge", "边到边间距",     "mm",  0.05,   5.0),
+    ("dielectric",   "介质厚度(地面)", "mm",  0.01,  3.20),
+]
+
+# 结果面板行定义  (显示标签, dict_key, 单位, 颜色)
+_NA = ""
+RESULT_ROWS = [
+    ("中心间距  d_cc",     "dcc",        "mm",    "#8b949e"),
+    ("",                   "",           "",      ""),
+    ("自由空间",           "",           "",      "#444e5a"),
+    ("  单根走线自感  L",  "L",          "nH",    "#58a6ff"),
+    ("  两线互感  M",      "M",          "nH",    "#bc8cff"),
+    ("  耦合系数  k",      "k",          "",      "#c9d1d9"),
+    ("  环路电感 L_loop",  "Lloop",      "nH",    "#3fb950"),
+    ("  单位长度",         "Lloop_pcm",  "nH/cm", "#8b949e"),
+    ("",                   "",           "",      ""),
+    ("含地平面（镜像法）", "",           "",      "#444e5a"),
+    ("  修正自感  L_eff",  "Leff",       "nH",    "#58a6ff"),
+    ("  修正互感  M_eff",  "Meff",       "nH",    "#bc8cff"),
+    ("  环路电感 L_gnd",   "LloopGnd",   "nH",    "#f0883e"),
+    ("  单位长度",         "Lgnd_pcm",   "nH/cm", "#8b949e"),
+    ("  地平面抑制",       "suppression","%",     "#3fb950"),
+]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 主应用类
+# ─────────────────────────────────────────────────────────────────────────────
+
+class PCBApp:
+
+    # ── 配色 ──────────────────────────────────────────────────────────────────
+    BG  = "#0d1117"    # 背景
+    BP  = "#161b22"    # 面板背景
+    CG  = "#21262d"    # 网格线
+    CB  = "#30363d"    # 边框
+    CT  = "#c9d1d9"    # 主文字
+    CM  = "#8b949e"    # 次要文字
+    CBA = "#58a6ff"    # 蓝（L 值、滑块值、当前点竖线）
+    CGR = "#3fb950"    # 绿（自由空间环路电感）
+    COR = "#f0883e"    # 橙（含地平面环路电感）
+    CAC = "#388bfd"    # 滑块填充色
+    CPU = "#bc8cff"    # 紫（互感 M）
+
+    def __init__(self):
+        self._updating = False
+        self._build_figure()
+        self._build_sliders()
+        self._build_results_panel()
+        self._build_buttons()
+        self._update(None)
+        self._connect()
+
+    # ── 图形骨架 ──────────────────────────────────────────────────────────────
+
+    def _build_figure(self):
+        w, h = _screen_inches()
+        self.fig = plt.figure(figsize=(w, h))
+        self.fig.patch.set_facecolor(self.BG)
+        self.fig.suptitle(
+            "PCB 走线寄生电感计算器  —  两根平行走线",
+            color=self.CT, fontsize=12, fontweight="bold", y=0.99,
+        )
+        # 3 图：柱状图 | 间距扫描 | 长度扫描
+        gs = gridspec.GridSpec(
+            1, 3, figure=self.fig,
+            top=0.94, bottom=0.39,
+            hspace=0.3, wspace=0.38,
+            width_ratios=[1, 1.4, 1.4],
+        )
+        self.ax_bar = self.fig.add_subplot(gs[0, 0])
+        self.ax_gap = self.fig.add_subplot(gs[0, 1])
+        self.ax_len = self.fig.add_subplot(gs[0, 2])
+
+    def _style(self, ax):
+        ax.set_facecolor(self.BP)
+        ax.tick_params(colors=self.CM, labelsize=8)
+        for sp in ax.spines.values():
+            sp.set_color(self.CB)
+        ax.xaxis.label.set_color(self.CM)
+        ax.yaxis.label.set_color(self.CM)
+        ax.title.set_color(self.CT)
+        ax.grid(True, color=self.CG, linestyle="--", alpha=0.7, lw=0.6)
+
+    # ── 滑块 + 文本框 ─────────────────────────────────────────────────────────
+
+    def _build_sliders(self):
+        self.sliders   = {}   # attr → Slider
+        self.textboxes = {}   # attr → (TextBox, vmin, vmax)
+
+        SL_X, SL_W  = 0.06, 0.34
+        TB_W, TB_GAP = 0.065, 0.006
+        row_y = [0.330, 0.287, 0.244, 0.201, 0.158]
+
+        for i, (attr, label, unit, vmin, vmax) in enumerate(PARAM_DEFS):
+            sy = row_y[i]
+
+            ax_s = self.fig.add_axes([SL_X, sy, SL_W, 0.026])
+            ax_s.set_facecolor(self.BP)
+            s = Slider(
+                ax_s, f"{label}  ({unit})", vmin, vmax,
+                valinit=DEFAULTS[attr],
+                color=self.CAC, track_color=self.CG,
+            )
+            s.label.set_color(self.CT);  s.label.set_fontsize(8)
+            s.valtext.set_color(self.CBA); s.valtext.set_fontsize(8)
+            self.sliders[attr] = s
+
+            ax_tb = self.fig.add_axes([SL_X + SL_W + TB_GAP, sy, TB_W, 0.026])
+            tb = TextBox(
+                ax_tb, "",
+                initial=f"{DEFAULTS[attr]:.4g}",
+                color=self.BP, hovercolor="#1e2a1e",
+            )
+            tb.text_disp.set_color(self.CBA)
+            tb.text_disp.set_fontsize(8.5)
+            for sp in ax_tb.spines.values():
+                sp.set_color(self.CB)
+            self.textboxes[attr] = (tb, vmin, vmax)
+
+    # ── 结果面板（右侧文字区）────────────────────────────────────────────────
+
+    def _build_results_panel(self):
+        ax = self.fig.add_axes([0.55, 0.085, 0.41, 0.29])
+        ax.set_facecolor(self.BP)
+        ax.tick_params(left=False, bottom=False, labelleft=False, labelbottom=False)
+        for sp in ax.spines.values():
+            sp.set_color(self.CB)
+        ax.set_xlim(0, 1)
+        ax.set_ylim(0, 1)
+        self._ax_res = ax
+
+        n = len(RESULT_ROWS)
+        step = 0.95 / n
+        self._rt = {}   # key → Text 对象
+
+        for i, (label, key, unit, color) in enumerate(RESULT_ROWS):
+            y = 0.975 - i * step
+            if not label:                     # 空行跳过
+                continue
+            ax.text(0.03, y, label,
+                    color=self.CM if not key else "#6e7681",
+                    fontsize=7.5, va="center")
+            if key:
+                vt = ax.text(0.70, y, "—",
+                             color=color, fontsize=7.5,
+                             va="center", ha="right",
+                             fontfamily="monospace")
+                ax.text(0.72, y, unit,
+                        color=self.CM, fontsize=7.0, va="center")
+                self._rt[key] = vt
+
+    # ── 按钮 + 状态栏 ─────────────────────────────────────────────────────────
+
+    def _build_buttons(self):
+        ax_rst = self.fig.add_axes([0.06, 0.042, 0.08, 0.034])
+        self.btn_reset = Button(ax_rst, "Reset",
+                                color=self.BP, hovercolor=self.CB)
+        self.btn_reset.label.set_color(self.CT)
+        self.btn_reset.label.set_fontsize(8)
+
+        ax_st = self.fig.add_axes([0.06, 0.008, 0.90, 0.018])
+        ax_st.axis("off")
+        self._status = ax_st.text(
+            0, 0.5, "就绪",
+            color=self.CM, fontsize=7.5, va="center",
+            fontfamily="monospace",
+        )
+
+    # ── 读取参数 ──────────────────────────────────────────────────────────────
+
+    def _read(self):
+        return {attr: s.val for attr, s in self.sliders.items()}
+
+    # ── 同步文本框 → 滑块 ─────────────────────────────────────────────────────
+
+    def _sync_tb(self):
+        if self._updating:
+            return
+        self._updating = True
+        for attr, (tb, _, _) in self.textboxes.items():
+            tb.set_val(f"{self.sliders[attr].val:.4g}")
+        self._updating = False
+
+    def _make_submit(self, attr):
+        def _sub(text):
+            if self._updating:
+                return
+            try:
+                tb, vmin, vmax = self.textboxes[attr]
+                val = float(np.clip(float(text), vmin, vmax))
+                self._updating = True
+                self.sliders[attr].set_val(val)
+                self._updating = False
+            except (ValueError, TypeError):
+                pass
+        return _sub
+
+    # ── 核心更新 ──────────────────────────────────────────────────────────────
+
+    def _update(self, _val):
+        p = self._read()
+        try:
+            r = compute(p["length"], p["width"], p["thickness"],
+                        p["edge_to_edge"], p["dielectric"])
+        except Exception as e:
+            self._status.set_text(f"计算错误: {e}")
+            self.fig.canvas.draw_idle()
+            return
+
+        # ── 刷新结果面板 ──────────────────────────────────────────────────────
+        fmts = {
+            "dcc":         f"{r['dcc']:.3f}",
+            "L":           f"{r['L']:.3f}",
+            "M":           f"{r['M']:.3f}",
+            "k":           f"{r['k']:.4f}",
+            "Lloop":       f"{r['Lloop']:.3f}",
+            "Lloop_pcm":   f"{r['Lloop_pcm']:.3f}",
+            "Leff":        f"{r['Leff']:.3f}",
+            "Meff":        f"{r['Meff']:.3f}",
+            "LloopGnd":    f"{r['LloopGnd']:.3f}",
+            "Lgnd_pcm":    f"{r['Lgnd_pcm']:.3f}",
+            "suppression": f"{r['suppression']:.2f}",
+        }
+        for key, txt in self._rt.items():
+            if key in fmts:
+                txt.set_text(fmts[key])
+
+        # ── 图1：电感量对比柱状图（横向）────────────────────────────────────
+        ax = self.ax_bar
+        ax.cla(); self._style(ax)
+        ax.grid(axis="x", color=self.CG, linestyle="--", alpha=0.7, lw=0.6)
+        ax.grid(axis="y", visible=False)
+
+        bar_data = [
+            ("L_loop_gnd", r["LloopGnd"], self.COR),
+            ("L_loop",     r["Lloop"],    self.CGR),
+            ("M",          r["M"],        self.CPU),
+            ("L",          r["L"],        self.CBA),
+        ]
+        names  = [d[0] for d in bar_data]
+        vals   = [d[1] for d in bar_data]
+        colors = [d[2] for d in bar_data]
+        ax.barh(names, vals, color=colors, alpha=0.85, height=0.55)
+        vmax = max(vals) if max(vals) > 0 else 1.0
+        for name, val, c in zip(names, vals, colors):
+            ax.text(val + vmax * 0.015, name,
+                    f"{val:.2f} nH",
+                    va="center", fontsize=8, color=c,
+                    fontfamily="monospace")
+        ax.set_xlim(0, vmax * 1.32)
+        ax.set_xlabel("Inductance (nH)", fontsize=8)
+        ax.set_title("电感量对比", fontsize=9)
+        ax.tick_params(axis="y", colors=self.CT, labelsize=8.5)
+
+        # ── 图2：环路电感 vs 边到边间距 ──────────────────────────────────────
+        ax = self.ax_gap
+        ax.cla(); self._style(ax)
+        gap_arr = np.linspace(0.05, 5.0, 200)
+        Lf, Lg = sweep_gap(p["length"], p["width"], p["thickness"],
+                           gap_arr, p["dielectric"])
+        ax.plot(gap_arr, Lf, color=self.CGR, lw=1.6, label="自由空间")
+        ax.plot(gap_arr, Lg, color=self.COR, lw=1.6, label="含地平面")
+        ax.axvline(p["edge_to_edge"], color=self.CBA,
+                   lw=1.2, ls="--", alpha=0.9, label="当前间距")
+        ax.scatter([p["edge_to_edge"]], [r["Lloop"]],    s=55,
+                   color=self.CGR, zorder=5)
+        ax.scatter([p["edge_to_edge"]], [r["LloopGnd"]], s=55,
+                   color=self.COR, zorder=5)
+        ax.set_xlabel("边到边间距 (mm)", fontsize=8)
+        ax.set_ylabel("环路电感 (nH)", fontsize=8)
+        ax.set_title("环路电感  vs  间距", fontsize=9)
+        ax.legend(fontsize=7.5, facecolor=self.BP,
+                  labelcolor=self.CT, edgecolor=self.CB, loc="upper right")
+
+        # ── 图3：环路电感 vs 走线长度 ────────────────────────────────────────
+        ax = self.ax_len
+        ax.cla(); self._style(ax)
+        len_arr = np.linspace(5.0, 500.0, 200)
+        Lf, Lg = sweep_len(len_arr, p["width"], p["thickness"],
+                           p["edge_to_edge"], p["dielectric"])
+        ax.plot(len_arr, Lf, color=self.CGR, lw=1.6, label="自由空间")
+        ax.plot(len_arr, Lg, color=self.COR, lw=1.6, label="含地平面")
+        ax.axvline(p["length"], color=self.CBA,
+                   lw=1.2, ls="--", alpha=0.9, label="当前长度")
+        ax.scatter([p["length"]], [r["Lloop"]],    s=55,
+                   color=self.CGR, zorder=5)
+        ax.scatter([p["length"]], [r["LloopGnd"]], s=55,
+                   color=self.COR, zorder=5)
+        ax.set_xlabel("走线长度 (mm)", fontsize=8)
+        ax.set_ylabel("环路电感 (nH)", fontsize=8)
+        ax.set_title("环路电感  vs  长度", fontsize=9)
+        ax.legend(fontsize=7.5, facecolor=self.BP,
+                  labelcolor=self.CT, edgecolor=self.CB, loc="upper left")
+
+        self._sync_tb()
+        self._status.set_text(
+            f"L={r['L']:.2f} nH   M={r['M']:.2f} nH   k={r['k']:.4f}   "
+            f"L_loop={r['Lloop']:.2f} nH   L_gnd={r['LloopGnd']:.2f} nH   "
+            f"抑制={r['suppression']:.1f}%   d_cc={r['dcc']:.3f} mm"
+        )
+        self.fig.canvas.draw_idle()
+
+    # ── 重置 ─────────────────────────────────────────────────────────────────
+
+    def _on_reset(self, _event):
+        for attr, s in self.sliders.items():
+            s.eventson = False
+            s.set_val(DEFAULTS[attr])
+            s.eventson = True
+        self._update(None)
+
+    # ── 事件绑定 ──────────────────────────────────────────────────────────────
+
+    def _connect(self):
+        for s in self.sliders.values():
+            s.on_changed(self._update)
+        self.btn_reset.on_clicked(self._on_reset)
+        for attr in self.textboxes:
+            tb, _, _ = self.textboxes[attr]
+            tb.on_submit(self._make_submit(attr))
+
+    def show(self):
+        plt.show()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+if __name__ == "__main__":
+    PCBApp().show()
